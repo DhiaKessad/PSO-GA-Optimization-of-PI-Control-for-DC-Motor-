@@ -5,10 +5,8 @@ modelName = 'simulation';
 targetSpeed = 2000;
 nVar = 2;
 
-% --- FIX 1: Define 'approx' BEFORE creating the function handle ---
 approx = 1; % first (or second) approximation : approx = 1 (or 2)
 
-% --- FIX 2: Pass 'approx' into the function handle ---
 Cost_function = @(x) cost_evaluator(x, modelName, targetSpeed, approx);
 
     center_Kp = 0.00122;
@@ -222,3 +220,4 @@ function execute_GA(Cost_function, nVar, LB, UB)
     fprintf('Optimal Ki found: %f\n', optimal_Ki);
     fprintf('Minimum Cost (ITAE): %f\n', min_cost);
 end
+
