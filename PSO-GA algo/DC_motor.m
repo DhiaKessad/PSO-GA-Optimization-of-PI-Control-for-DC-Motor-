@@ -1,12 +1,23 @@
-close all; clc;
+close all;
 
 % 1. CONFIGURATION
 modelName = 'simulation';
 targetSpeed = 2000;
 nVar = 2;
-% Create function handle capturing main workspace variables
-Cost_function = @(x) cost_evaluator(x, modelName, targetSpeed);
-approx = 2; % first (or second) approximation : approx = 1 (or 2)
+
+% --- FIX 1: Define 'approx' BEFORE creating the function handle ---
+approx = 1; % first (or second) approximation : approx = 1 (or 2)
+
+% --- FIX 2: Pass 'approx' into the function handle ---
+Cost_function = @(x) cost_evaluator(x, modelName, targetSpeed, approx);
+
+    center_Kp = 0.00122;
+    center_Ki = 0.0188;
+    LB = [center_Kp * 0.95,  center_Ki * 0.95]; 
+    UB = [center_Kp * 1.15,  center_Ki * 1.15];
+    problem.Var_min = [center_Kp * 0.95,  center_Ki * 0.95];
+    problem.Var_max = [center_Kp * 1.15,  center_Ki * 1.15];
+
 algorithm = 'GA'; % 'PSO' or 'GA'
 
 %% %%% FAST RESTART SETUP %%%
@@ -30,63 +41,26 @@ finishup = onCleanup(@() cleanup_fast_restart(modelName));
 if strcmp(algorithm, 'PSO')
     problem.nVar = nVar;
     problem.Cost_function = Cost_function;
-    
-    switch approx 
-    case 1
-        fprintf('First order approximation:...\n');
-        % %% First order approximation
-        center_Kp = 0.0022;
-        center_Ki = 0.0057;
-        problem.Var_min = [center_Kp * 0.1,  center_Ki * 0.8]; 
-        problem.Var_max = [center_Kp * 1.2,  center_Ki * 5]; 
-        
-    case 2
-        fprintf('Second order approximation:...\n');
-        % %% Second order approximation
-        center_Kp = 0.00122;
-        center_Ki = 0.0188;
-        problem.Var_min = [center_Kp * 0.1,  center_Ki * 0.1]; 
-        problem.Var_max = [center_Kp * 10,   center_Ki * 10];
-        
-    otherwise
-        error('Invalid approximation choice: approx must be 1 or 2.');
-    end
-
     execute_PSO(problem);
 
 elseif strcmp(algorithm, 'GA')
-    switch approx 
-    case 1
-        fprintf('First order approximation:...\n');
-        % %% First order approximation
-        center_Kp = 0.0022;
-        center_Ki = 0.0057;
-        LB = [center_Kp * 0.1,  center_Ki * 0.8]; 
-        UB = [center_Kp * 1.2,  center_Ki * 5]; 
-        
-    case 2
-        fprintf('Second order approximation:...\n');
-        % %% Second order approximation
-        center_Kp = 0.00122;
-        center_Ki = 0.0188;
-        LB = [center_Kp * 0.1,  center_Ki * 0.1]; 
-        UB = [center_Kp * 10,  center_Ki * 10];
-        
-    otherwise
-        error('Invalid approximation choice: approx must be 1 or 2.');
-    end
+    
     execute_GA(Cost_function, nVar, LB, UB);
 end
 
 %% %%% LOCAL FUNCTIONS %%%
 
-function Cost = cost_evaluator(x, modelName, targetSpeed)
+function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
     Kp = x(1);
     Ki = x(2);
     
     in = Simulink.SimulationInput(modelName);
+    
+    % Pass variables to the simulation workspace
     in = in.setVariable('Kp', Kp);
     in = in.setVariable('Ki', Ki);
+    in = in.setVariable('targetSpeed', targetSpeed); 
+    in = in.setVariable('approx', approx);
     
     try
         % Using 'sim' in Fast Restart mode
@@ -97,13 +71,12 @@ function Cost = cost_evaluator(x, modelName, targetSpeed)
         end
         
         logs = simOut.get('logsout');
-        % Assuming the signal of interest is the first one logged
         sig = logs.get(1).Values; 
         t = sig.Time; 
         y = sig.Data;
         
         % Instability check
-        if any(isnan(y)) || max(y) > targetSpeed * 1.5
+        if any(isnan(y)) || max(y) > targetSpeed * 2.0 
             Cost = 1e10; return;
         end
         
@@ -116,13 +89,14 @@ function Cost = cost_evaluator(x, modelName, targetSpeed)
         
         Cost = itae + (overshoot * 500000); 
         
-    catch
+    catch ME
+        % Debugging: Print error if it fails
+        % fprintf('Sim Error: %s\n', ME.message); 
         Cost = 1e10; 
     end
 end
 
 function cleanup_fast_restart(modelName)
-    % This function runs when the script ends or crashes
     if bdIsLoaded(modelName)
         try
             set_param(modelName, 'FastRestart', 'off');
@@ -229,7 +203,7 @@ function execute_GA(Cost_function, nVar, LB, UB)
     % --- 2. Set GA Options ---
     options = optimoptions('ga');
     options.PopulationSize = 30;           
-    options.MaxGenerations =  10;          
+    options.MaxGenerations =  15;          
     options.CrossoverFraction = 0.8;       
     options.EliteCount = 2;                
     options.PlotFcn = {@gaplotbestf};      
