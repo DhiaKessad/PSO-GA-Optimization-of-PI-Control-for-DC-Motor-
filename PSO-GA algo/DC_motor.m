@@ -4,22 +4,19 @@ function DC_motor()
     % 1. CONFIGURATION
     modelName = 'simulation';
     targetSpeed = 2000;
-    approx = 2; 
+    approx = 1; 
 
     problem.nVar = 2;
-
     center_Kp = 0.00122;
     center_Ki = 0.0188;
     problem.Var_min = [center_Kp * 0.95,  center_Ki * 0.95];
     problem.Var_max = [center_Kp * 1.15,  center_Ki * 1.15];
 
-    algorithm = 'PSO'; 
+    algorithm = 'GA'; 
 
     %% FAST RESTART SETUP 
     load_system(modelName);
     set_param(modelName, 'FastRestart', 'on');
-
-    % This object ensures Fast Restart is turned OFF when the function ends/crashes
     finishup = onCleanup(@() cleanup_fast_restart(modelName));
 
     %% %%% OPTIMIZATION EXECUTION %%%
@@ -28,16 +25,18 @@ function DC_motor()
     end
 
     if strcmp(algorithm, 'PSO')
-       execute_PSO(problem, modelName, targetSpeed, approx);
-
+       best_params = execute_PSO(problem, modelName, targetSpeed, approx);
     elseif strcmp(algorithm, 'GA')
-        execute_GA(@(x) cost_evaluator(x, modelName, targetSpeed, approx) ...
+       best_params = execute_GA(@(x) cost_evaluator(x, modelName, targetSpeed, approx) ...
             , problem.nVar, problem.Var_min, problem.Var_max);
     end
 
+    assignin('base', 'Kp', best_params(1));
+    assignin('base', 'Ki', best_params(2));
     assignin('base', 'targetSpeed', targetSpeed);
     assignin('base', 'approx', approx);
 end 
+
 %% %%% LOCAL FUNCTIONS %%%
 
 function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
@@ -54,11 +53,11 @@ function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
     in = in.setVariable('targetSpeed', targetSpeed); 
     in = in.setVariable('approx', approx);
     in = in.setModelParameter('FastRestart', 'on');
+    in = in.setModelParameter('Open', 'off');
     
     try
-        simOut = sim(in);
-        
         % Check for logsout
+        simOut = sim(in);
         logs = simOut.get('logsout');
         if isempty(logs)
             Cost = 1e10; return;
@@ -67,15 +66,13 @@ function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
         sig = logs.get('logsout').Values; 
         t = sig.Time; 
         y = sig.Data;
-        
+
         % ITAE Calculation
         e = abs(targetSpeed - y);
         itae = trapz(t, t .* e);
-        
         % Overshoot Penalty
         overshoot = max(0, max(y) - (targetSpeed * 1.02));
         Cost = itae + (overshoot * 500000); 
-        
     catch
         Cost = 1e10; 
     end
@@ -92,30 +89,28 @@ function cleanup_fast_restart(modelName)
 end
 
 %% PSO Wrapper
-function execute_PSO(problem, modelName, targetSpeed, approx)
-    params.MaxIt = 10;   
-    params.nPop = 30;    
+function best_params = execute_PSO(problem, modelName, targetSpeed, approx)
+    params.MaxIt = 30;   
+    params.nPop = 50;    
     params.w = 0.4;      
     params.wdamp = 1.0; 
     params.c1 = 1.5;     
     params.c2 = 1.5; 
 
     fprintf('Starting PSO Optimization...\n');
-    out = PSO(problem, params, modelName, targetSpeed, approx); 
+    [best_params, best_cost] = PSO(problem, params, modelName, targetSpeed, approx); 
 
-    Global_Best = out.Best_Solution;
     fprintf('\n========================================\n');
-    fprintf('FINAL PSO VALUES: Kp: %.6f, Ki: %.5f\n', Global_Best.Position(1), Global_Best.Position(2));
-    fprintf('Minimum Cost: %.4f\n', Global_Best.Cost);
+    fprintf('FINAL PSO VALUES: Kp: %.6f, Ki: %.5f\n', best_params(1), best_params(2));
+    fprintf('Minimum Cost: %.4f\n', best_cost);
     fprintf('========================================\n');
 end
 
 %% PSO Core Logic
-function out = PSO(problem, params, modelName, targetSpeed, approx)
+function [Global_Best_Position, Global_Best_Cost] = PSO(problem, params, modelName, targetSpeed, approx)
     nVar = problem.nVar;
     Var_min = problem.Var_min;
     Var_max = problem.Var_max;
-
     MaxIt = params.MaxIt;
     nPop = params.nPop;
     w = params.w;
@@ -126,7 +121,7 @@ function out = PSO(problem, params, modelName, targetSpeed, approx)
     Velocity = zeros(nPop, nVar); 
     Position = repmat(Var_min, nPop, 1) + rand(nPop, nVar) .* repmat((Var_max - Var_min), nPop, 1);
     Cost = zeros(nPop, 1);
-    
+
     % Initial Evaluation
     parfor i=1:nPop
         Cost(i) = cost_evaluator(Position(i,:), modelName, targetSpeed, approx);
@@ -140,20 +135,18 @@ function out = PSO(problem, params, modelName, targetSpeed, approx)
     for it = 1:MaxIt
         r1 = rand(nPop, nVar);
         r2 = rand(nPop, nVar);
-        
         % Update Velocity & Position
         Velocity = w * Velocity + ...
                    c1 * r1 .* (PBest_Position - Position) + ...
                    c2 * r2 .* (repmat(Global_Best_Position, nPop, 1) - Position);
         
         Position = Position + Velocity;
-        Position = max(min(Position, Var_max), Var_min); % Clamp bounds
+        Position = max(min(Position, Var_max), Var_min); 
         
         % Parallel evaluation of the population
         parfor i=1:nPop
             Cost(i) = cost_evaluator(Position(i,:), modelName, targetSpeed, approx);
         end
-        
         % Sequential update of personal and global bests
         for i=1:nPop
             if Cost(i) < PBest_Cost(i)
@@ -166,27 +159,20 @@ function out = PSO(problem, params, modelName, targetSpeed, approx)
                 end
             end
         end
-        
         % Global_Best_Position(1) is Kp, Global_Best_Position(2) is Ki
         fprintf('Iter %d: Cost=%.4f | Best Kp=%.7f, Best Ki=%.6f\n', ...
                 it, Global_Best_Cost, Global_Best_Position(1), Global_Best_Position(2));
-        
         w = w * wdamp;
     end
-    
-    out.Best_Solution.Position = Global_Best_Position;
-    out.Best_Solution.Cost = Global_Best_Cost;
 end
-%% GA Wrapper
-function execute_GA(Cost_function, nVar, LB, UB)
-    fprintf('Starting GA Optimization...\n');
 
+%% GA Wrapper
+function optimal_params = execute_GA(Cost_function, nVar, LB, UB)
+    fprintf('Starting GA Optimization...\n');
     options = optimoptions('ga', ...
         'UseParallel', true, ...
         'PopulationSize', 50, ...
         'MaxGenerations', 30, ...
-        'CrossoverFraction', 0.8, ...
-        'EliteCount', 2, ...
         'PlotFcn', @gaplotbestf);             
 
     [optimal_params, min_cost] = ga(Cost_function, nVar, [], [], [], [], LB, UB, [], options);       
