@@ -4,18 +4,16 @@ function DC_motor()
     % 1. CONFIGURATION
     modelName = 'simulation';
     targetSpeed = 2000;
-    problem.nVar = 2;
     approx = 2; 
 
-    % Define the cost function handle
-    problem.Cost_function = @(x) cost_evaluator(x, modelName, targetSpeed, approx);
+    problem.nVar = 2;
 
     center_Kp = 0.00122;
     center_Ki = 0.0188;
     problem.Var_min = [center_Kp * 0.95,  center_Ki * 0.95];
     problem.Var_max = [center_Kp * 1.15,  center_Ki * 1.15];
 
-    algorithm = 'PSO'; 
+    algorithm = 'GA'; 
 
     %% FAST RESTART SETUP 
     load_system(modelName);
@@ -30,9 +28,10 @@ function DC_motor()
     end
 
     if strcmp(algorithm, 'PSO')
-        execute_PSO(problem);
+       execute_PSO(problem, modelName, targetSpeed, approx);
     elseif strcmp(algorithm, 'GA')
-        execute_GA(problem.Cost_function, problem.nVar, problem.Var_min, problem.Var_max);
+        execute_GA(@(x) cost_evaluator(x, modelName, targetSpeed, approx) ...
+            , problem.nVar, problem.Var_min, problem.Var_max);
     end
 end 
 %% %%% LOCAL FUNCTIONS %%%
@@ -91,7 +90,7 @@ function cleanup_fast_restart(modelName)
 end
 
 %% PSO Wrapper
-function execute_PSO(problem)
+function execute_PSO(problem, modelName, targetSpeed, approx)
     params.MaxIt = 20;   
     params.nPop = 40;    
     params.w = 0.4;      
@@ -100,7 +99,7 @@ function execute_PSO(problem)
     params.c2 = 1.5; 
 
     fprintf('Starting PSO Optimization...\n');
-    out = PSO(problem, params); 
+    out = PSO(problem, params, modelName, targetSpeed, approx); 
 
     Global_Best = out.Best_Solution;
     fprintf('\n========================================\n');
@@ -110,11 +109,11 @@ function execute_PSO(problem)
 end
 
 %% PSO Core Logic
-function out = PSO(problem, params)
-    Cost_function = problem.Cost_function; 
+function out = PSO(problem, params, modelName, targetSpeed, approx)
     nVar = problem.nVar;
     Var_min = problem.Var_min;
     Var_max = problem.Var_max;
+
     MaxIt = params.MaxIt;
     nPop = params.nPop;
     w = params.w;
@@ -128,7 +127,7 @@ function out = PSO(problem, params)
     
     % Initial Evaluation
     parfor i=1:nPop
-        Cost(i) = Cost_function(Position(i,:));
+        Cost(i) = cost_evaluator(Position(i,:), modelName, targetSpeed, approx);
     end
     
     PBest_Position = Position;
@@ -150,7 +149,7 @@ function out = PSO(problem, params)
         
         % Parallel evaluation of the population
         parfor i=1:nPop
-            Cost(i) = Cost_function(Position(i,:));
+            Cost(i) = cost_evaluator(Position(i,:), modelName, targetSpeed, approx);
         end
         
         % Sequential update of personal and global bests
