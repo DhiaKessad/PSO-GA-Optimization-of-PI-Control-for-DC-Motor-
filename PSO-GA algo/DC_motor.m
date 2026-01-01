@@ -9,8 +9,8 @@ function DC_motor()
     problem.nVar = 2;
     center_Kp = 0.00122;
     center_Ki = 0.0188;
-    problem.Var_min = [center_Kp * 0.95,  center_Ki * 0.95];
-    problem.Var_max = [center_Kp * 1.15,  center_Ki * 1.15];
+    problem.Var_min = [center_Kp * 0.8,  center_Ki * 0.8];
+    problem.Var_max = [center_Kp * 1.2,  center_Ki * 1.2];
 
     algorithm = 'GA'; 
 
@@ -181,3 +181,4 @@ function optimal_params = execute_GA(Cost_function, nVar, LB, UB)
     fprintf('Optimal Kp: %f, Ki: %f\n', optimal_params(1), optimal_params(2));
     fprintf('Minimum Cost: %f\n', min_cost);
 end
+
