@@ -13,7 +13,7 @@ function DC_motor()
     problem.Var_min = [center_Kp * 0.95,  center_Ki * 0.95];
     problem.Var_max = [center_Kp * 1.15,  center_Ki * 1.15];
 
-    algorithm = 'GA'; 
+    algorithm = 'PSO'; 
 
     %% FAST RESTART SETUP 
     load_system(modelName);
@@ -29,10 +29,14 @@ function DC_motor()
 
     if strcmp(algorithm, 'PSO')
        execute_PSO(problem, modelName, targetSpeed, approx);
+
     elseif strcmp(algorithm, 'GA')
         execute_GA(@(x) cost_evaluator(x, modelName, targetSpeed, approx) ...
             , problem.nVar, problem.Var_min, problem.Var_max);
     end
+
+    assignin('base', 'targetSpeed', targetSpeed);
+    assignin('base', 'approx', approx);
 end 
 %% %%% LOCAL FUNCTIONS %%%
 
@@ -60,7 +64,7 @@ function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
             Cost = 1e10; return;
         end
         
-        sig = logs.get(1).Values; 
+        sig = logs.get('logsout').Values; 
         t = sig.Time; 
         y = sig.Data;
         
@@ -77,22 +81,20 @@ function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
     end
 end
 
-% --- THE MISSING FUNCTION THAT CAUSED YOUR ERROR ---
 function cleanup_fast_restart(modelName)
     if bdIsLoaded(modelName)
         try
             set_param(modelName, 'FastRestart', 'off');
             fprintf('Cleaned up: Fast Restart turned off for %s.\n', modelName);
         catch
-            % Already closed or handled
         end
     end
 end
 
 %% PSO Wrapper
 function execute_PSO(problem, modelName, targetSpeed, approx)
-    params.MaxIt = 20;   
-    params.nPop = 40;    
+    params.MaxIt = 10;   
+    params.nPop = 30;    
     params.w = 0.4;      
     params.wdamp = 1.0; 
     params.c1 = 1.5;     
@@ -165,7 +167,6 @@ function out = PSO(problem, params, modelName, targetSpeed, approx)
             end
         end
         
-        % --- UPDATED PRINT LINE ---
         % Global_Best_Position(1) is Kp, Global_Best_Position(2) is Ki
         fprintf('Iter %d: Cost=%.4f | Best Kp=%.7f, Best Ki=%.6f\n', ...
                 it, Global_Best_Cost, Global_Best_Position(1), Global_Best_Position(2));
@@ -180,7 +181,6 @@ end
 function execute_GA(Cost_function, nVar, LB, UB)
     fprintf('Starting GA Optimization...\n');
 
-    % Fixed Syntax for PlotFcn
     options = optimoptions('ga', ...
         'UseParallel', true, ...
         'PopulationSize', 50, ...
