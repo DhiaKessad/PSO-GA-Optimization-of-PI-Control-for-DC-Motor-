@@ -9,17 +9,17 @@ function DC_motor()
     problem.nVar = 2;
     center_Kp = 0.00122;
     center_Ki = 0.0188;
-    problem.Var_min = [center_Kp * 0.8,  center_Ki * 0.8];
-    problem.Var_max = [center_Kp * 1.2,  center_Ki * 1.2];
+    problem.Var_min = [0,  center_Ki * 0.8];
+    problem.Var_max = [center_Kp * 2.5,  center_Ki * 1.2];
 
-    algorithm = 'GA'; 
+    algorithm = 'PSO'; 
 
     %% FAST RESTART SETUP 
     load_system(modelName);
     set_param(modelName, 'FastRestart', 'on');
     finishup = onCleanup(@() cleanup_fast_restart(modelName));
 
-    %% %%% OPTIMIZATION EXECUTION %%%
+    %% OPTIMIZATION EXECUTION
     if isempty(gcp('nocreate'))
         parpool('local'); 
     end
@@ -31,14 +31,16 @@ function DC_motor()
             , problem.nVar, problem.Var_min, problem.Var_max);
     end
 
+    %% HEATMAP GENERATION
+    generate_heatmap(problem, modelName, targetSpeed, approx, 60, best_params);
+
     assignin('base', 'Kp', best_params(1));
     assignin('base', 'Ki', best_params(2));
     assignin('base', 'targetSpeed', targetSpeed);
     assignin('base', 'approx', approx);
-end 
+end
 
-%% %%% LOCAL FUNCTIONS %%%
-
+%% LOCAL FUNCTIONS
 function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
     Kp = x(1);
     Ki = x(2);
@@ -71,8 +73,13 @@ function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
         e = abs(targetSpeed - y);
         itae = trapz(t, t .* e);
         % Overshoot Penalty
-        overshoot = max(0, max(y) - (targetSpeed * 1.02));
-        Cost = itae + (overshoot * 500000); 
+        overshoot = max(0, max(y) - (targetSpeed * 1.05));
+
+        %High Kp Penalty
+        effort_penalty = Kp * 100000; 
+
+        % Total Cost
+        Cost = itae + (overshoot * 500000) + effort_penalty; 
     catch
         Cost = 1e10; 
     end
@@ -90,8 +97,8 @@ end
 
 %% PSO Wrapper
 function best_params = execute_PSO(problem, modelName, targetSpeed, approx)
-    params.MaxIt = 30;   
-    params.nPop = 50;    
+    params.MaxIt = 10;   
+    params.nPop = 30;    
     params.w = 0.4;      
     params.wdamp = 1.0; 
     params.c1 = 1.5;     
@@ -106,7 +113,7 @@ function best_params = execute_PSO(problem, modelName, targetSpeed, approx)
     fprintf('========================================\n');
 end
 
-%% PSO Core Logic
+%% PSO
 function [Global_Best_Position, Global_Best_Cost] = PSO(problem, params, modelName, targetSpeed, approx)
     nVar = problem.nVar;
     Var_min = problem.Var_min;
@@ -181,4 +188,42 @@ function optimal_params = execute_GA(Cost_function, nVar, LB, UB)
     fprintf('Optimal Kp: %f, Ki: %f\n', optimal_params(1), optimal_params(2));
     fprintf('Minimum Cost: %f\n', min_cost);
 end
-
+%% HeatMap
+function generate_heatmap(problem, modelName, targetSpeed, approx, resolution, best_params)
+    % resolution: number of points per axis (e.g., 20x20 = 400 simulations)
+    
+    kp_axis = linspace(problem.Var_min(1), problem.Var_max(1), resolution);
+    ki_axis = linspace(problem.Var_min(2), problem.Var_max(2), resolution);
+    
+    [KP, KI] = meshgrid(kp_axis, ki_axis);
+    COST_GRID = zeros(size(KP));
+    
+    fprintf('Generating Heatmap (%d simulations)... This may take a while.\n', resolution^2);
+    
+    parfor i = 1:numel(KP)
+        current_x = [KP(i), KI(i)];
+        COST_GRID(i) = cost_evaluator(current_x, modelName, targetSpeed, approx);
+    end
+    
+    % Plotting
+    figure('Color', 'w', 'Name', 'ITAE Cost Heatmap');
+    h = pcolor(KP, KI, COST_GRID);
+    set(h, 'EdgeColor', 'none'); 
+    shading interp; 
+    
+    colorbar;
+    colormap('jet');
+    xlabel('Gain Kp');
+    ylabel('Gain Ki');
+    title(['Cost Heatmap (ITAE + Penalty) - Target: ', num2str(targetSpeed)]);
+    grid on;
+    
+    hold on;
+    % Mark Center
+    plot(mean(kp_axis), mean(ki_axis), 'wx', 'MarkerSize', 10, 'LineWidth', 2);
+    text(mean(kp_axis), mean(ki_axis), ' Center', 'Color', 'white');
+    
+    % Mark Best Found (This now works because best_params is an input)
+    plot(best_params(1), best_params(2), 'm*', 'MarkerSize', 12, 'LineWidth', 2);
+    text(best_params(1), best_params(2), '  Optimizer Best', 'Color', 'magenta', 'FontWeight', 'bold');
+end
