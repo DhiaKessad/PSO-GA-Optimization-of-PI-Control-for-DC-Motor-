@@ -223,7 +223,8 @@ function generate_heatmap(problem, modelName, targetSpeed, approx, resolution, b
     plot(mean(kp_axis), mean(ki_axis), 'wx', 'MarkerSize', 10, 'LineWidth', 2);
     text(mean(kp_axis), mean(ki_axis), ' Center', 'Color', 'white');
     
-    % Mark Best Found (This now works because best_params is an input)
+    % Mark Best Found
     plot(best_params(1), best_params(2), 'm*', 'MarkerSize', 12, 'LineWidth', 2);
     text(best_params(1), best_params(2), '  Optimizer Best', 'Color', 'magenta', 'FontWeight', 'bold');
 end
+
