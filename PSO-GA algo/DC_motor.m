@@ -1,172 +1,123 @@
-close all; clc;
+function DC_motor()
+    close all;
 
-% 1. CONFIGURATION
-modelName = 'simulation';
-targetSpeed = 2000;
-nVar = 2;
-% Create function handle capturing main workspace variables
-Cost_function = @(x) cost_evaluator(x, modelName, targetSpeed);
-approx = 2; % first (or second) approximation : approx = 1 (or 2)
-algorithm = 'GA'; % 'PSO' or 'GA'
+    % 1. CONFIGURATION
+    modelName = 'simulation';
+    targetSpeed = 2000;
+    approx = 1; 
 
-%% %%% FAST RESTART SETUP %%%
+    problem.nVar = 2;
+    center_Kp = 0.00122;
+    center_Ki = 0.0188;
+    problem.Var_min = [0,  center_Ki * 0.8];
+    problem.Var_max = [center_Kp * 2.5,  center_Ki * 1.2];
 
-% 1. Load the model into memory explicitly
-load_system(modelName);
+    algorithm = 'PSO'; 
 
-% 2. Check if model is dirty (unsaved changes) to avoid popups
-if strcmp(get_param(modelName, 'Dirty'), 'on')
-    save_system(modelName);
-end
+    %% FAST RESTART SETUP 
+    load_system(modelName);
+    set_param(modelName, 'FastRestart', 'on');
+    finishup = onCleanup(@() cleanup_fast_restart(modelName));
 
-% 3. Enable Fast Restart
-set_param(modelName, 'FastRestart', 'on');
-
-% 4. Create a safety object. 
-finishup = onCleanup(@() cleanup_fast_restart(modelName));
-
-%% %%% OPTIMIZATION EXECUTION %%%
-
-if strcmp(algorithm, 'PSO')
-    problem.nVar = nVar;
-    problem.Cost_function = Cost_function;
-    
-    switch approx 
-    case 1
-        fprintf('First order approximation:...\n');
-        % %% First order approximation
-        center_Kp = 0.0022;
-        center_Ki = 0.0057;
-        problem.Var_min = [center_Kp * 0.1,  center_Ki * 0.8]; 
-        problem.Var_max = [center_Kp * 1.2,  center_Ki * 5]; 
-        
-    case 2
-        fprintf('Second order approximation:...\n');
-        % %% Second order approximation
-        center_Kp = 0.00122;
-        center_Ki = 0.0188;
-        problem.Var_min = [center_Kp * 0.1,  center_Ki * 0.1]; 
-        problem.Var_max = [center_Kp * 10,   center_Ki * 10];
-        
-    otherwise
-        error('Invalid approximation choice: approx must be 1 or 2.');
+    %% OPTIMIZATION EXECUTION
+    if isempty(gcp('nocreate'))
+        parpool('local'); 
     end
 
-    execute_PSO(problem);
-
-elseif strcmp(algorithm, 'GA')
-    switch approx 
-    case 1
-        fprintf('First order approximation:...\n');
-        % %% First order approximation
-        center_Kp = 0.0022;
-        center_Ki = 0.0057;
-        LB = [center_Kp * 0.1,  center_Ki * 0.8]; 
-        UB = [center_Kp * 1.2,  center_Ki * 5]; 
-        
-    case 2
-        fprintf('Second order approximation:...\n');
-        % %% Second order approximation
-        center_Kp = 0.00122;
-        center_Ki = 0.0188;
-        LB = [center_Kp * 0.1,  center_Ki * 0.1]; 
-        UB = [center_Kp * 10,  center_Ki * 10];
-        
-    otherwise
-        error('Invalid approximation choice: approx must be 1 or 2.');
+    if strcmp(algorithm, 'PSO')
+       best_params = execute_PSO(problem, modelName, targetSpeed, approx);
+    elseif strcmp(algorithm, 'GA')
+       best_params = execute_GA(@(x) cost_evaluator(x, modelName, targetSpeed, approx) ...
+            , problem.nVar, problem.Var_min, problem.Var_max);
     end
-    execute_GA(Cost_function, nVar, LB, UB);
+
+    %% HEATMAP GENERATION
+    generate_heatmap(problem, modelName, targetSpeed, approx, 60, best_params);
+
+    assignin('base', 'Kp', best_params(1));
+    assignin('base', 'Ki', best_params(2));
+    assignin('base', 'targetSpeed', targetSpeed);
+    assignin('base', 'approx', approx);
 end
 
-%% %%% LOCAL FUNCTIONS %%%
-
-function Cost = cost_evaluator(x, modelName, targetSpeed)
+%% LOCAL FUNCTIONS
+function Cost = cost_evaluator(x, modelName, targetSpeed, approx)
     Kp = x(1);
     Ki = x(2);
+    
+    if ~bdIsLoaded(modelName)
+        load_system(modelName);
+    end
     
     in = Simulink.SimulationInput(modelName);
     in = in.setVariable('Kp', Kp);
     in = in.setVariable('Ki', Ki);
+    in = in.setVariable('targetSpeed', targetSpeed); 
+    in = in.setVariable('approx', approx);
+    in = in.setModelParameter('FastRestart', 'on');
+    in = in.setModelParameter('Open', 'off');
     
     try
-        % Using 'sim' in Fast Restart mode
+        % Check for logsout
         simOut = sim(in);
-        
-        if isempty(simOut.find('logsout'))
+        logs = simOut.get('logsout');
+        if isempty(logs)
             Cost = 1e10; return;
         end
         
-        logs = simOut.get('logsout');
-        % Assuming the signal of interest is the first one logged
-        sig = logs.get(1).Values; 
+        sig = logs.get('logsout').Values; 
         t = sig.Time; 
         y = sig.Data;
-        
-        % Instability check
-        if any(isnan(y)) || max(y) > targetSpeed * 1.5
-            Cost = 1e10; return;
-        end
-        
-        % 1. ITAE (Speed)
+
+        % ITAE Calculation
         e = abs(targetSpeed - y);
         itae = trapz(t, t .* e);
-        
-        % 2. Overshoot Penalty
-        overshoot = max(0, max(y) - (targetSpeed * 1.02));
-        
-        Cost = itae + (overshoot * 500000); 
-        
+        % Overshoot Penalty
+        overshoot = max(0, max(y) - (targetSpeed * 1.05));
+
+        %High Kp Penalty
+        effort_penalty = Kp * 100000; 
+
+        % Total Cost
+        Cost = itae + (overshoot * 500000) + effort_penalty; 
     catch
         Cost = 1e10; 
     end
 end
 
 function cleanup_fast_restart(modelName)
-    % This function runs when the script ends or crashes
     if bdIsLoaded(modelName)
         try
             set_param(modelName, 'FastRestart', 'off');
-            fprintf('Fast Restart turned off for %s.\n', modelName);
+            fprintf('Cleaned up: Fast Restart turned off for %s.\n', modelName);
         catch
-            warning('Could not turn off Fast Restart.');
         end
     end
 end
 
 %% PSO Wrapper
-function execute_PSO(problem)
-    % Define algorithm parameters locally
-    params.MaxIt = 15;   
-    params.nPop = 15;    
+function best_params = execute_PSO(problem, modelName, targetSpeed, approx)
+    params.MaxIt = 10;   
+    params.nPop = 30;    
     params.w = 0.4;      
     params.wdamp = 1.0; 
     params.c1 = 1.5;     
     params.c2 = 1.5; 
 
     fprintf('Starting PSO Optimization...\n');
-    
-    % Run the Optimization
-    out = PSO(problem, params); 
-
-    Global_Best = out.Best_Solution;
-    final_Kp = Global_Best.Position(1);
-    final_Ki = Global_Best.Position(2);
+    [best_params, best_cost] = PSO(problem, params, modelName, targetSpeed, approx); 
 
     fprintf('\n========================================\n');
-    fprintf('FINAL PRODUCTION VALUES (PSO)\n');
-    fprintf('Kp: %.8f\n', final_Kp);
-    fprintf('Ki: %.8f\n', final_Ki);
-    fprintf('Minimum Cost: %.4f\n', Global_Best.Cost);
+    fprintf('FINAL PSO VALUES: Kp: %.6f, Ki: %.5f\n', best_params(1), best_params(2));
+    fprintf('Minimum Cost: %.4f\n', best_cost);
     fprintf('========================================\n');
 end
 
-%% PSO Core Logic
-function out = PSO(problem, params)
-    Cost_function = problem.Cost_function; 
+%% PSO
+function [Global_Best_Position, Global_Best_Cost] = PSO(problem, params, modelName, targetSpeed, approx)
     nVar = problem.nVar;
     Var_min = problem.Var_min;
     Var_max = problem.Var_max;
-    
     MaxIt = params.MaxIt;
     nPop = params.nPop;
     w = params.w;
@@ -176,75 +127,104 @@ function out = PSO(problem, params)
     
     Velocity = zeros(nPop, nVar); 
     Position = repmat(Var_min, nPop, 1) + rand(nPop, nVar) .* repmat((Var_max - Var_min), nPop, 1);
-    
     Cost = zeros(nPop, 1);
-    for i=1:nPop
-        Cost(i) = Cost_function(Position(i,:));
+
+    % Initial Evaluation
+    parfor i=1:nPop
+        Cost(i) = cost_evaluator(Position(i,:), modelName, targetSpeed, approx);
     end
     
     PBest_Position = Position;
     PBest_Cost = Cost;
-    
     [Global_Best_Cost, Min_Index] = min(PBest_Cost);
     Global_Best_Position = PBest_Position(Min_Index, :);
     
     for it = 1:MaxIt
         r1 = rand(nPop, nVar);
         r2 = rand(nPop, nVar);
-        
+        % Update Velocity & Position
         Velocity = w * Velocity + ...
                    c1 * r1 .* (PBest_Position - Position) + ...
                    c2 * r2 .* (repmat(Global_Best_Position, nPop, 1) - Position);
         
         Position = Position + Velocity;
+        Position = max(min(Position, Var_max), Var_min); 
         
-        % Clamp position to bounds
-        Position = max(Position, repmat(Var_min, nPop, 1));
-        Position = min(Position, repmat(Var_max, nPop, 1)); 
-        
+        % Parallel evaluation of the population
+        parfor i=1:nPop
+            Cost(i) = cost_evaluator(Position(i,:), modelName, targetSpeed, approx);
+        end
+        % Sequential update of personal and global bests
         for i=1:nPop
-            Cost(i) = Cost_function(Position(i,:));
             if Cost(i) < PBest_Cost(i)
                 PBest_Cost(i) = Cost(i);
                 PBest_Position(i,:) = Position(i,:);
+                
                 if PBest_Cost(i) < Global_Best_Cost
                     Global_Best_Cost = PBest_Cost(i);
                     Global_Best_Position = PBest_Position(i,:);
                 end
             end
         end
-        
-        fprintf('Iter %d: Cost=%.2f (Kp=%.6f, Ki=%.6f)\n', it, Global_Best_Cost, Global_Best_Position);
+        % Global_Best_Position(1) is Kp, Global_Best_Position(2) is Ki
+        fprintf('Iter %d: Cost=%.4f | Best Kp=%.7f, Best Ki=%.6f\n', ...
+                it, Global_Best_Cost, Global_Best_Position(1), Global_Best_Position(2));
         w = w * wdamp;
     end
-    
-    out.Best_Solution.Position = Global_Best_Position;
-    out.Best_Solution.Cost = Global_Best_Cost;
 end
 
 %% GA Wrapper
-function execute_GA(Cost_function, nVar, LB, UB)
-    fprintf('Starting Fine Tuning with GA...\n');
+function optimal_params = execute_GA(Cost_function, nVar, LB, UB)
+    fprintf('Starting GA Optimization...\n');
+    options = optimoptions('ga', ...
+        'UseParallel', true, ...
+        'PopulationSize', 50, ...
+        'MaxGenerations', 30, ...
+        'PlotFcn', @gaplotbestf);             
 
-    % --- 2. Set GA Options ---
-    options = optimoptions('ga');
-    options.PopulationSize = 30;           
-    options.MaxGenerations =  10;          
-    options.CrossoverFraction = 0.8;       
-    options.EliteCount = 2;                
-    options.PlotFcn = {@gaplotbestf};      
-
-    % --- 3. Run the Genetic Algorithm ---
-    [optimal_params, min_cost] = ga(Cost_function, nVar, ... 
-                                    [], [], [], [], ... 
-                                    LB, UB, ...         
-                                    [], options);       
+    [optimal_params, min_cost] = ga(Cost_function, nVar, [], [], [], [], LB, UB, [], options);       
                                     
-    % --- 4. Display Results ---
-    optimal_Kp = optimal_params(1);
-    optimal_Ki = optimal_params(2);
     fprintf('\n--- GA Optimization Complete ---\n');
-    fprintf('Optimal Kp found: %f\n', optimal_Kp);
-    fprintf('Optimal Ki found: %f\n', optimal_Ki);
-    fprintf('Minimum Cost (ITAE): %f\n', min_cost);
+    fprintf('Optimal Kp: %f, Ki: %f\n', optimal_params(1), optimal_params(2));
+    fprintf('Minimum Cost: %f\n', min_cost);
 end
+%% HeatMap
+function generate_heatmap(problem, modelName, targetSpeed, approx, resolution, best_params)
+    % resolution: number of points per axis (e.g., 20x20 = 400 simulations)
+    
+    kp_axis = linspace(problem.Var_min(1), problem.Var_max(1), resolution);
+    ki_axis = linspace(problem.Var_min(2), problem.Var_max(2), resolution);
+    
+    [KP, KI] = meshgrid(kp_axis, ki_axis);
+    COST_GRID = zeros(size(KP));
+    
+    fprintf('Generating Heatmap (%d simulations)... This may take a while.\n', resolution^2);
+    
+    parfor i = 1:numel(KP)
+        current_x = [KP(i), KI(i)];
+        COST_GRID(i) = cost_evaluator(current_x, modelName, targetSpeed, approx);
+    end
+    
+    % Plotting
+    figure('Color', 'w', 'Name', 'ITAE Cost Heatmap');
+    h = pcolor(KP, KI, COST_GRID);
+    set(h, 'EdgeColor', 'none'); 
+    shading interp; 
+    
+    colorbar;
+    colormap('jet');
+    xlabel('Gain Kp');
+    ylabel('Gain Ki');
+    title(['Cost Heatmap (ITAE + Penalty) - Target: ', num2str(targetSpeed)]);
+    grid on;
+    
+    hold on;
+    % Mark Center
+    plot(mean(kp_axis), mean(ki_axis), 'wx', 'MarkerSize', 10, 'LineWidth', 2);
+    text(mean(kp_axis), mean(ki_axis), ' Center', 'Color', 'white');
+    
+    % Mark Best Found
+    plot(best_params(1), best_params(2), 'm*', 'MarkerSize', 12, 'LineWidth', 2);
+    text(best_params(1), best_params(2), '  Optimizer Best', 'Color', 'magenta', 'FontWeight', 'bold');
+end
+
